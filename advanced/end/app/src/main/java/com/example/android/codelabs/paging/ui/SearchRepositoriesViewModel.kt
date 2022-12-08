@@ -16,6 +16,7 @@
 
 package com.example.android.codelabs.paging.ui
 
+import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -25,18 +26,7 @@ import androidx.paging.insertSeparators
 import androidx.paging.map
 import com.example.android.codelabs.paging.data.GithubRepository
 import com.example.android.codelabs.paging.model.Repo
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filterIsInstance
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.onStart
-import kotlinx.coroutines.flow.shareIn
-import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
 /**
@@ -64,10 +54,31 @@ class SearchRepositoriesViewModel(
         val initialQuery: String = savedStateHandle.get(LAST_SEARCH_QUERY) ?: DEFAULT_QUERY
         val lastQueryScrolled: String = savedStateHandle.get(LAST_QUERY_SCROLLED) ?: DEFAULT_QUERY
         val actionStateFlow = MutableSharedFlow<UiAction>()
+
         val searches = actionStateFlow
             .filterIsInstance<UiAction.Search>()
             .distinctUntilChanged()
             .onStart { emit(UiAction.Search(query = initialQuery)) }
+
+/*TODO ===> shareIn:
+
+This is todo needed because when this Flow is ultimately consumed,
+it is consumed todo using a flatmapLatest operator.
+
+Each time the upstream emits, todo flatmapLatest will cancel the last Flow
+it was operating on, and start TODO  working based on the new flow it was given.
+
+In our case, this would make us lose the value of the last query the user
+has scrolled through. So, TODO we use the Flow operator with a replay value of 1 to cache the last value
+                          so that it isn't lost when a new query comes in.
+
+
+TODO onStart:
+
+Also TODO used for caching. If the app was killed,
+but the user had already scrolled through a query,
+we TODO don't want to scroll the list to the top causing them to lose their place again.*/
+
         val queriesScrolled = actionStateFlow
             .filterIsInstance<UiAction.Scroll>()
             .distinctUntilChanged()
@@ -80,15 +91,32 @@ class SearchRepositoriesViewModel(
             )
             .onStart { emit(UiAction.Scroll(currentQuery = lastQueryScrolled)) }
 
+
+        /*TODO cachedIn()
+
+        Flow<PagingData> has a todo handy cachedIn() method that allows us to cache the content of a Flow<PagingData>
+ in a CoroutineScope.*/
+
         pagingDataFlow = searches
-            .flatMapLatest { searchRepo(queryString = it.query) }
+            .flatMapLatest {
+                Log.d(TAG, "ViewModel-> pagingDataFlow->flatMapLatest-> Query ${it.query} ")
+                searchRepo(queryString = it.query)
+            }
             .cachedIn(viewModelScope)
+
+        /*TODO Combine :
+
+        When flow represents the most recent value of a variable or operation
+(see also the related section on conflation),
+it might be needed to TODO perform a computation that depends on the most recent values of the
+todo corresponding flows and to recompute it whenever any of the upstream flows emit a value.*/
 
         state = combine(
             searches,
             queriesScrolled,
             ::Pair
         ).map { (search, scroll) ->
+            Log.d(TAG, "View Model -> state flow: search $search scroll $scroll ")
             UiState(
                 query = search.query,
                 lastQueryScrolled = scroll.currentQuery,
@@ -103,6 +131,7 @@ class SearchRepositoriesViewModel(
             )
 
         accept = { action ->
+            //  Log.d(TAG, "accept callback: action $action")
             viewModelScope.launch { actionStateFlow.emit(action) }
         }
     }
@@ -113,10 +142,21 @@ class SearchRepositoriesViewModel(
         super.onCleared()
     }
 
-    private fun searchRepo(queryString: String): Flow<PagingData<UiModel>> =
-        repository.getSearchResultStream(queryString)
+    private fun searchRepo(queryString: String): Flow<PagingData<UiModel>> {
+
+        Log.d(TAG, "searchRepo: called :queryString $queryString ")
+        return repository.getSearchResultStream(queryString)
             .map { pagingData -> pagingData.map { UiModel.RepoItem(it) } }
             .map {
+
+
+                /*Now we can insert the separators!{
+                todo For each emission of the Flow, we'll call PagingData.ins}ertSeparators().
+                This method returns a PagingData containing each original element, with an optional separator
+                that you will generate, given the elements before and after.
+                In boundary conditions (at the beginning or end of the list) the respective
+                before or after elements will be null. If a separator doesn't need to be created, return null.*/
+
                 it.insertSeparators { before, after ->
                     if (after == null) {
                         // we're at the end of the list
@@ -140,6 +180,8 @@ class SearchRepositoriesViewModel(
                     }
                 }
             }
+
+    }
 }
 
 sealed class UiAction {
@@ -157,6 +199,9 @@ sealed class UiModel {
     data class RepoItem(val repo: Repo) : UiModel()
     data class SeparatorItem(val description: String) : UiModel()
 }
+
+/*Because we want to separate repositories based on 10k stars,
+let's create an todo extension property on RepoItem that rounds up the number of stars for us:*/
 
 private val UiModel.RepoItem.roundedStarCount: Int
     get() = this.repo.stars / 10_000
